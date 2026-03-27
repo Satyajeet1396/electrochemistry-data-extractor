@@ -8,304 +8,237 @@ import qrcode
 from io import BytesIO
 import base64
 
-# -----------------------------------------------------------------------------
-# GCD Extraction Logic (Adapted from extract_gcd_data.py)
-# -----------------------------------------------------------------------------
-COL_CYCLENO   = 4
-COL_STEPNO    = 6
-COL_STEPTIME  = 7
-COL_VOLTAGE   = 9
+# ---------------------- PAGE CONFIG ----------------------
+st.set_page_config(page_title="Electrochemistry Extractor", layout="centered")
+
+# ---------------------- MODERN CSS ----------------------
+st.markdown("""
+<style>
+.main {
+    background: linear-gradient(135deg, #0f172a, #1e293b);
+    color: white;
+}
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+.card {
+    background: #111827;
+    padding: 2rem;
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+h1, h2, h3 {
+    text-align: center;
+}
+.stButton>button {
+    width: 100%;
+    border-radius: 12px;
+    height: 3em;
+    font-size: 16px;
+    font-weight: bold;
+    background: linear-gradient(90deg, #06b6d4, #3b82f6);
+    color: white;
+    border: none;
+}
+.stDownloadButton>button {
+    width: 100%;
+    border-radius: 12px;
+    height: 3em;
+    font-size: 16px;
+    font-weight: bold;
+    background: linear-gradient(90deg, #22c55e, #16a34a);
+    color: white;
+}
+.upload-box {
+    border: 2px dashed #3b82f6;
+    padding: 1.5rem;
+    border-radius: 15px;
+    text-align: center;
+}
+.footer {
+    text-align: center;
+    font-size: 14px;
+    opacity: 0.7;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------- HEADER ----------------------
+st.markdown('<div class="card">', unsafe_allow_html=True)
+
+st.title("⚡ Electrochemistry Data Extractor")
+st.caption("Upload `.xlsb` files → Extract CV / GCD → Download instantly")
+
+# ---------------------- INPUT SECTION ----------------------
+option = st.radio("Select Mode", ["CV", "GCD"], horizontal=True)
+
+uploaded_files = st.file_uploader(
+    "📂 Upload Files",
+    type=["xlsb"],
+    accept_multiple_files=True
+)
+
+colA, colB = st.columns(2)
+
+process = colA.button("🚀 Process Files")
+clear = colB.button("🗑 Remove All Files")
+
+if clear:
+    st.session_state.clear()
+    st.rerun()
+
+# ---------------------- CORE FUNCTIONS ----------------------
+COL_CYCLENO, COL_STEPNO, COL_STEPTIME, COL_VOLTAGE = 4, 6, 7, 9
 
 def _iter_records(raw: bytes):
     i = 0
-    n = len(raw)
-    while i < n:
+    while i < len(raw):
         b0 = raw[i]; i += 1
         if b0 & 0x80:
-            if i >= n: break
             b1 = raw[i]; i += 1
             rec_type = (b0 & 0x7F) | (b1 << 7)
         else:
             rec_type = b0
 
-        size = 0; shift = 0
+        size, shift = 0, 0
         for _ in range(4):
-            if i >= n: break
             b = raw[i]; i += 1
             size |= (b & 0x7F) << shift
             shift += 7
             if not (b & 0x80): break
 
-        rec_data = raw[i:i + size]
+        rec_data = raw[i:i+size]
         i += size
         yield rec_type, rec_data
 
-def _decode_xlwidestring(rec_data: bytes, str_offset: int = 8) -> str:
-    if len(rec_data) < str_offset + 5:
-        return ''
-    cch   = struct.unpack_from('<I', rec_data, str_offset)[0]
-    high  = rec_data[str_offset + 4]
-    start = str_offset + 5
-    nb    = cch * (2 if high else 1)
-    raw   = rec_data[start: start + nb]
-    enc   = 'utf-16-le' if high else 'latin-1'
-    return raw.decode(enc, errors='replace').replace('\x00', '').strip()
-
-def _parse_time(s: str) -> float:
-    s = s.strip()
-    if ':' in s:
-        m, sec = s.split(':', 1)
-        return float(m) * 60.0 + float(sec)
-    return float(s)
-
-def read_sheet(file_obj, sheet_entry: str = "xl/worksheets/sheet2.bin") -> dict:
+def read_sheet(file_obj):
     with zipfile.ZipFile(file_obj) as z:
-        raw = z.read(sheet_entry)
+        raw = z.read("xl/worksheets/sheet2.bin")
 
     cycle, step, step_time, voltage = {}, {}, {}, {}
     cur_row = -1
+
     for rec_type, rec_data in _iter_records(raw):
         if rec_type == 0 and len(rec_data) >= 4:
             cur_row = struct.unpack_from('<I', rec_data, 0)[0]
             continue
         if cur_row <= 0:
             continue
-        if rec_type == 62 and len(rec_data) >= 13:
+
+        if rec_type == 62:
             col = struct.unpack_from('<I', rec_data, 0)[0]
             if col == COL_STEPTIME:
-                s = _decode_xlwidestring(rec_data, str_offset=8)
-                if s:
-                    try:
-                        step_time[cur_row] = _parse_time(s)
-                    except ValueError:
-                        pass
-        elif rec_type == 5 and len(rec_data) >= 16:
+                try:
+                    val = rec_data[13:].decode(errors="ignore")
+                    step_time[cur_row] = float(val.split(":")[-1])
+                except:
+                    pass
+
+        elif rec_type == 5:
             col = struct.unpack_from('<I', rec_data, 0)[0]
-            if col == COL_CYCLENO:
-                cycle[cur_row] = struct.unpack_from('<d', rec_data, 8)[0]
-            elif col == COL_STEPNO:
-                step[cur_row] = struct.unpack_from('<d', rec_data, 8)[0]
-            elif col == COL_VOLTAGE:
-                voltage[cur_row] = struct.unpack_from('<d', rec_data, 8)[0]
+            val = struct.unpack_from('<d', rec_data, 8)[0]
+            if col == COL_CYCLENO: cycle[cur_row] = val
+            elif col == COL_STEPNO: step[cur_row] = val
+            elif col == COL_VOLTAGE: voltage[cur_row] = val
 
-    return {'cycle': cycle, 'step': step, 'step_time': step_time, 'voltage': voltage}
+    return cycle, step, step_time, voltage
 
-def process_gcd_file(file_obj) -> pd.DataFrame:
-    data = read_sheet(file_obj)
-    cycle, step, step_time, voltage = data['cycle'], data['step'], data['step_time'], data['voltage']
+def process_gcd_file(file):
+    cycle, step, step_time, voltage = read_sheet(file)
+    rows = sorted(set(cycle) & set(step) & set(step_time) & set(voltage))
 
-    rows_22, rows_31 = [], []
-    all_rows = sorted(set(cycle) & set(step) & set(step_time) & set(voltage))
-    for r in all_rows:
-        c, s = cycle[r], step[r]
-        if abs(c - 2) < 0.5 and abs(s - 2) < 0.5:
-            rows_22.append(r)
-        elif abs(c - 3) < 0.5 and abs(s - 1) < 0.5:
-            rows_31.append(r)
+    data = []
+    for r in rows:
+        data.append([step_time[r], voltage[r]])
 
-    if not rows_22 and not rows_31:
-        return None
+    return pd.DataFrame(data, columns=["StepTime_s", "Voltage_V"])
 
-    rows_22.sort()
-    rows_31.sort()
-    pieces = []
-    offset = 0.0
+def process_cv_file(file):
+    df = pd.read_excel(file, engine="pyxlsb", header=None)
+    df = df.dropna()
 
-    if rows_22:
-        times = [step_time[r] for r in rows_22]
-        volts = [voltage[r] for r in rows_22]
-        t0 = times[0]
-        elapsed = [t - t0 + offset for t in times]
-        cadence = times[-1] - times[-2] if len(times) > 1 else 1.0
-        offset = elapsed[-1] + abs(cadence)
-        pieces.append(pd.DataFrame({'StepTime_s': elapsed, 'Voltage_V': volts}))
+    return df.iloc[:, [9, 8]].rename(columns={9: "Voltage_V", 8: "_Current_A"})
 
-    if rows_31:
-        times = [step_time[r] for r in rows_31]
-        volts = [voltage[r] for r in rows_31]
-        t0 = times[0]
-        elapsed = [t - t0 + offset for t in times]
-        pieces.append(pd.DataFrame({'StepTime_s': elapsed, 'Voltage_V': volts}))
-
-    return pd.concat(pieces, ignore_index=True) if pieces else None
-
-# -----------------------------------------------------------------------------
-# CV Extraction Logic (Adapted from extract_CV_xlsb.py)
-# -----------------------------------------------------------------------------
-def process_cv_file(file_obj) -> pd.DataFrame:
-    df = pd.read_excel(file_obj, sheet_name="DCData1", engine="pyxlsb", header=None)
-    first_row = df.iloc[0].astype(str).tolist()
-    has_headers = False
-    for val in first_row:
-        if "CycleNo" in str(val):
-            has_headers = True
-            break
-            
-    cycle_idx, curr_idx, volt_idx = 4, 8, 9
-    
-    if has_headers:
-        cycle_idx = next((i for i, x in enumerate(first_row) if "CycleNo" in str(x)), 4)
-        curr_idx = next((i for i, x in enumerate(first_row) if "_Current_A" in str(x)), 8)
-        volt_idx = next((i for i, x in enumerate(first_row) if "Voltage_V" in str(x)), 9)
-        df = df.iloc[1:].reset_index(drop=True)
-    else:
-        if df.iloc[0].isna().all():
-            df = df.iloc[1:].reset_index(drop=True)
-
-    cycle_col = df.iloc[:, cycle_idx]
-    cycle_values = pd.to_numeric(cycle_col, errors='coerce').dropna()
-    unique_cycles = sorted(cycle_values.unique())
-    
-    if len(unique_cycles) < 2:
-        return None
-        
-    second_last_cycle = unique_cycles[-2]
-    mask = (pd.to_numeric(cycle_col, errors='coerce') == second_last_cycle)
-    filtered_df = df[mask]
-    
-    extracted = filtered_df.iloc[:, [volt_idx, curr_idx]].reset_index(drop=True)
-    extracted.columns = ['Voltage_V', '_Current_A']
-    return extracted
-
-# -----------------------------------------------------------------------------
-# Streamlit UI
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="Electrochemistry Data Extractor", layout="wide")
-st.title("Electrochemistry Data Extractor")
-st.markdown("Upload your `.xlsb` files and select the extraction method (CV or GCD).")
-
-option = st.radio("Select Processing Mode:", ("CV", "GCD"))
-uploaded_files = st.file_uploader("Upload .xlsb files", type=["xlsb"], accept_multiple_files=True)
-
-if st.button("Process Files"):
+# ---------------------- PROCESSING ----------------------
+if process:
     if not uploaded_files:
-        st.warning("Please upload at least one .xlsb file.")
+        st.warning("⚠️ Upload files first")
     else:
+        progress = st.progress(0)
         results = []
-        progress_bar = st.progress(0)
-        
+
         for i, file in enumerate(uploaded_files):
             try:
-                if option == "CV":
-                    df = process_cv_file(file)
-                else:
-                    df = process_gcd_file(file)
-                    
-                if df is not None and not df.empty:
+                df = process_cv_file(file) if option == "CV" else process_gcd_file(file)
+                if df is not None:
                     results.append((file.name, df))
-                else:
-                    st.warning(f"No valid data extracted from {file.name}.")
             except Exception as e:
-                st.error(f"Failed to process {file.name}: {e}")
-            progress_bar.progress((i + 1) / len(uploaded_files))
-            
+                st.error(f"{file.name}: {e}")
+            progress.progress((i+1)/len(uploaded_files))
+
         if results:
-            st.success(f"Successfully processed {len(results)} files. Preparing Excel output...")
-            
             output = io.BytesIO()
+
             if option == "CV":
-                final_df = pd.concat([res[1] for res in results], axis=1)
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Combined Data"
-                
-                filenames = [res[0] for res in results]
-                row1 = []
-                for fn in filenames:
-                    row1.extend([fn, ""])
-                ws.append(row1)
-                
-                row2 = []
-                for _ in filenames:
-                    row2.extend(["Voltage_V", "_Current_A"])
-                ws.append(row2)
-                
-                final_df.fillna("", inplace=True)
-                for r in final_df.itertuples(index=False, name=None):
-                    ws.append(r)
-                wb.save(output)
+                final = pd.concat([r[1] for r in results], axis=1)
+                final.to_excel(output, index=False)
             else:
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    wb = writer.book
-                    ws = wb.create_sheet("Extracted Data")
-                    col_start = 1
-                    for file_name, df_data in results:
-                        ws.cell(row=1, column=col_start, value=file_name)
-                        ws.cell(row=2, column=col_start, value="StepTime_s")
-                        ws.cell(row=2, column=col_start + 1, value="Voltage_V")
-                        
-                        for row_idx, (st_val, vv) in enumerate(zip(df_data["StepTime_s"], df_data["Voltage_V"]), start=3):
-                            cell_t = ws.cell(row=row_idx, column=col_start, value=round(float(st_val), 4))
-                            cell_t.number_format = "0.0000"
-                            ws.cell(row=row_idx, column=col_start + 1, value=round(float(vv), 6))
-                        col_start += 3
-                        
-                    if "Sheet" in wb.sheetnames:
-                        del wb["Sheet"]
-            
+                    for name, df in results:
+                        df.to_excel(writer, sheet_name=name[:30], index=False)
+
             output.seek(0)
-            file_name = f"Combined_{option}_Data.xlsx"
-            st.download_button(label="Download Combined Excel File", data=output, file_name=file_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else:
-            st.error("No valid data was extracted. Please check your files.")
 
-# Footer and support section
-col1, col2 = st.columns([2, 1])
-with col1:
-    st.info("Created by Dr. Satyajeet Patil")
-    st.info("For more research tools visit: https://patilsatyajeet.wixsite.com/home/python")
-with col2:
-    st.metric("Enhanced Features", "5+", delta="New in this version")
+            st.success("✅ Done! File ready")
 
-# Support section in expander
-with st.expander("🤝 Support Our Research", expanded=False):
-    st.markdown("""
-        <div style='text-align: center; padding: 1rem; background-color: #f0f2f6; border-radius: 10px; margin: 1rem 0;'>
-            <h3>🙏 Your Support Makes a Difference!</h3>
-            <p>Your contribution helps us continue developing free tools for the research community.</p>
-            <p>Every donation, no matter how small, fuels our research journey!</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Two columns for QR code and Buy Me a Coffee button
+            st.download_button(
+                "⬇ Download Excel",
+                data=output,
+                file_name=f"{option}_Data.xlsx"
+            )
+
+            # 🔥 AUTO DOWNLOAD
+            st.markdown("""
+                <script>
+                const btn = window.parent.document.querySelector('button[kind="primary"]');
+                if (btn) btn.click();
+                </script>
+            """, unsafe_allow_html=True)
+
+# ---------------------- SUPPORT SECTION ----------------------
+with st.expander("❤️ Support Research"):
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        st.markdown("#### UPI Payment")
-        # Generate UPI QR code
-        upi_url = "upi://pay?pa=satyajeet1396@oksbi&pn=Satyajeet Patil&cu=INR"
-        qr = qrcode.make(upi_url)
-        
-        # Save QR code to BytesIO
+        upi = "upi://pay?pa=satyajeet1396@oksbi&pn=Satyajeet"
+        qr = qrcode.make(upi)
+
         buffer = BytesIO()
         qr.save(buffer, format="PNG")
-        buffer.seek(0)
-        qr_base64 = base64.b64encode(buffer.getvalue()).decode()
-        
-        # Display QR code with message
-        st.markdown("Scan to pay: **satyajeet1396@oksbi**")
-        st.markdown(
-            f"""
-            <div style="display: flex; justify-content: center; align-items: center;">
-                <img src="data:image/png;base64,{qr_base64}" width="200">
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-    
-    with col2:
-        st.markdown("#### Buy Me a Coffee")
-        st.markdown("Support through Buy Me a Coffee platform:")
-        # Buy Me a Coffee button
-        st.markdown(
-            """
-            <div style="display: flex; justify-content: center; align-items: center; height: 100%;">
-                <a href="https://www.buymeacoffee.com/researcher13" target="_blank">
-                    <img src="https://img.buymeacoffee.com/button-api/?text=Support our Research&emoji=&slug=researcher13&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Support our Research"/>
-                </a>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        img = base64.b64encode(buffer.getvalue()).decode()
 
-st.info("🚀 A small donation from you can fuel our research journey, turning ideas into breakthroughs that can change lives!")
+        st.markdown(f"""
+        <div style="text-align:center">
+        <img src="data:image/png;base64,{img}" width="180"><br>
+        <b>satyajeet1396@oksbi</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown("""
+        <div style="text-align:center">
+        <a href="https://www.buymeacoffee.com/researcher13">
+        ☕ Buy Me a Coffee
+        </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ---------------------- FOOTER ----------------------
+st.markdown("""
+<div class="footer">
+Created by Dr. Satyajeet Patil • Research Tools for Scientists 🚀
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
