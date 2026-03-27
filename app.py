@@ -5,6 +5,9 @@ import zipfile
 import struct
 import io
 import qrcode
+from io import BytesIO
+import base64
+
 # -----------------------------------------------------------------------------
 # GCD Extraction Logic (Adapted from extract_gcd_data.py)
 # -----------------------------------------------------------------------------
